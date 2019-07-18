@@ -63,19 +63,21 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base32"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"hash"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -83,20 +85,49 @@ import (
 	"github.com/atotto/clipboard"
 )
 
+const (
+	TypeTOTP        = "TOTP"
+	TypeHOTP        = "HOTP"
+	AlgorithmSHA1   = "SHA1"
+	AlgorithmSHA256 = "SHA256"
+	AlgorithmSHA512 = "SHA512"
+	AlgorithmMD5    = "MD5"
+
+	counterLen = 20
+)
+
+type Key struct {
+	Secret    string `json:"secret"`
+	Digits    int    `json:"digits"`
+	Label     string `json:"label"`
+	Algorithm string `json:"algorithm"`
+	Type      string `json:"type"`
+	Counter   uint64 `json:"counter,omitempty"`
+	Period    int    `json:"period,omitempty"`
+}
+
+type Keychain struct {
+	File string
+	Keys []Key
+}
+
 var (
-	flagAdd  = flag.Bool("add", false, "add a key")
-	flagList = flag.Bool("list", false, "list keys")
-	flagHotp = flag.Bool("hotp", false, "add key as HOTP (counter-based) key")
-	flag7    = flag.Bool("7", false, "generate 7-digit code")
-	flag8    = flag.Bool("8", false, "generate 8-digit code")
-	flagClip = flag.Bool("clip", false, "copy code to the clipboard")
+	flagAdd    = flag.Bool("add", false, "add a key")
+	flagList   = flag.Bool("list", false, "list keys")
+	flagHotp   = flag.Bool("hotp", false, "add key as HOTP (counter-based) key")
+	flag7      = flag.Bool("7", false, "generate 7-digit code")
+	flag8      = flag.Bool("8", false, "generate 8-digit code")
+	flagClip   = flag.Bool("clip", false, "copy code to the clipboard")
+	flagRemove = flag.Bool("remove", false, "remove a key")
 )
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "usage:\n")
 	fmt.Fprintf(os.Stderr, "\t2fa -add [-7] [-8] [-hotp] keyname\n")
+	fmt.Fprintf(os.Stderr, "\t2fa -remove keyname\n")
 	fmt.Fprintf(os.Stderr, "\t2fa -list\n")
 	fmt.Fprintf(os.Stderr, "\t2fa [-clip] keyname\n")
+	fmt.Fprintf(os.Stderr, "\t    you can override $HOME/.2fa by exporting 2FA_KEYCHAIN\n")
 	os.Exit(2)
 }
 
@@ -106,8 +137,12 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	k := readKeychain(filepath.Join(os.Getenv("HOME"), ".2fa"))
+	keychainPath := filepath.Join(os.Getenv("HOME"), ".2fa")
+	if len(os.Getenv("2FA_KEYCHAIN")) > 0 {
+		keychainPath = os.Getenv("2FA_KEYCHAIN")
+	}
 
+	k := readKeychain(keychainPath)
 	if *flagList {
 		if flag.NArg() != 0 {
 			usage()
@@ -115,7 +150,7 @@ func main() {
 		k.list()
 		return
 	}
-	if flag.NArg() == 0 && !*flagAdd {
+	if flag.NArg() == 0 && !*flagAdd && !*flagRemove {
 		if *flagClip {
 			usage()
 		}
@@ -136,27 +171,20 @@ func main() {
 		k.add(name)
 		return
 	}
+	if *flagRemove {
+		if *flagClip {
+			usage()
+		}
+		k.remove(name)
+		return
+	}
 	k.show(name)
 }
 
-type Keychain struct {
-	file string
-	data []byte
-	keys map[string]Key
-}
-
-type Key struct {
-	raw    []byte
-	digits int
-	offset int // offset of counter
-}
-
-const counterLen = 20
-
 func readKeychain(file string) *Keychain {
 	c := &Keychain{
-		file: file,
-		keys: make(map[string]Key),
+		File: file,
+		Keys: make([]Key, 0),
 	}
 	data, err := ioutil.ReadFile(file)
 	if err != nil {
@@ -165,55 +193,19 @@ func readKeychain(file string) *Keychain {
 		}
 		log.Fatal(err)
 	}
-	c.data = data
-
-	lines := bytes.SplitAfter(data, []byte("\n"))
-	offset := 0
-	for i, line := range lines {
-		lineno := i + 1
-		offset += len(line)
-		f := bytes.Split(bytes.TrimSuffix(line, []byte("\n")), []byte(" "))
-		if len(f) == 1 && len(f[0]) == 0 {
-			continue
+	err = json.Unmarshal(data, &c.Keys)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return c
 		}
-		if len(f) >= 3 && len(f[1]) == 1 && '6' <= f[1][0] && f[1][0] <= '8' {
-			var k Key
-			name := string(f[0])
-			k.digits = int(f[1][0] - '0')
-			raw, err := decodeKey(string(f[2]))
-			if err == nil {
-				k.raw = raw
-				if len(f) == 3 {
-					c.keys[name] = k
-					continue
-				}
-				if len(f) == 4 && len(f[3]) == counterLen {
-					_, err := strconv.ParseUint(string(f[3]), 10, 64)
-					if err == nil {
-						// Valid counter.
-						k.offset = offset - counterLen
-						if line[len(line)-1] == '\n' {
-							k.offset--
-						}
-						c.keys[name] = k
-						continue
-					}
-				}
-			}
-		}
-		log.Printf("%s:%d: malformed key", c.file, lineno)
+		log.Fatal(err)
 	}
 	return c
 }
 
 func (c *Keychain) list() {
-	var names []string
-	for name := range c.keys {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		fmt.Println(name)
+	for _, key := range c.Keys {
+		fmt.Printf("%s %s\n", key.Type, key.Label)
 	}
 }
 
@@ -224,78 +216,128 @@ func noSpace(r rune) rune {
 	return r
 }
 
-func (c *Keychain) add(name string) {
-	size := 6
+func (c *Keychain) save() {
+	data, err := json.MarshalIndent(c.Keys, "", "\t")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	f, err := os.OpenFile(c.File, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
+	if err != nil {
+		log.Fatalf("keychain file open: %v", err)
+	}
+	f.Chmod(0600)
+
+	if _, err := f.Write(data); err != nil {
+		log.Fatalf("keychain file write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		log.Fatalf("keychain file close: %v", err)
+	}
+}
+
+func (c *Keychain) add(kName string) {
+	kDigits := 6
 	if *flag7 {
-		size = 7
+		kDigits = 7
 		if *flag8 {
 			log.Fatalf("cannot use -7 and -8 together")
 		}
 	} else if *flag8 {
-		size = 8
+		kDigits = 8
 	}
 
-	fmt.Fprintf(os.Stderr, "2fa key for %s: ", name)
-	text, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Fprintf(os.Stderr, "2fa key for %s: ", kName)
+	kSecret, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil {
 		log.Fatalf("error reading key: %v", err)
 	}
-	text = strings.Map(noSpace, text)
-	text += strings.Repeat("=", -len(text)&7) // pad to 8 bytes
-	if _, err := decodeKey(text); err != nil {
+	kSecret = strings.Map(noSpace, kSecret)
+	kSecret += strings.Repeat("=", -len(kSecret)&7) // pad to 8 bytes
+	if _, err := decodeKey(kSecret); err != nil {
 		log.Fatalf("invalid key: %v", err)
 	}
 
-	line := fmt.Sprintf("%s %d %s", name, size, text)
+	kType := TypeTOTP
+	kPeriod := 30
 	if *flagHotp {
-		line += " " + strings.Repeat("0", 20)
+		kType = TypeHOTP
+		kPeriod = 0
 	}
-	line += "\n"
 
-	f, err := os.OpenFile(c.file, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+	c.Keys = append(c.Keys, Key{
+		Secret:    kSecret,
+		Digits:    kDigits,
+		Label:     kName,
+		Algorithm: AlgorithmSHA1,
+		Type:      kType,
+		Counter:   0,
+		Period:    kPeriod,
+	})
+	c.save()
+}
+
+func (c *Keychain) remove(kName string) {
+	_, idx := c.find(kName)
+	if idx < 0 {
+		log.Fatalf("no such label %q", kName)
+	}
+	c.Keys = append(c.Keys[:idx], c.Keys[idx+1:]...)
+	c.save()
+}
+
+func (c *Keychain) find(name string) (Key, int) {
+	for idx, key := range c.Keys {
+		if key.Label == name {
+			return key, idx
+		}
+	}
+	return Key{}, -1
+}
+
+func (k Key) algorithm() func() hash.Hash {
+	switch k.Algorithm {
+	case AlgorithmSHA1:
+		return sha1.New
+	case AlgorithmSHA256:
+		return sha256.New
+	case AlgorithmSHA512:
+		return sha512.New
+	case AlgorithmMD5:
+		return md5.New
+	}
+	panic("unreached")
+}
+
+func (k Key) code() (codeStr string, secondLeft int) {
+	secondLeft = -1
+	var code int
+	rawsec, err := decodeKey(k.Secret)
 	if err != nil {
-		log.Fatalf("opening keychain: %v", err)
+		log.Fatalf("invalid key: %v", err)
 	}
-	f.Chmod(0600)
-
-	if _, err := f.Write([]byte(line)); err != nil {
-		log.Fatalf("adding key: %v", err)
+	if k.Type == TypeHOTP {
+		k.Counter++
+		code = hotp(rawsec, k.Counter, k.Digits, k.algorithm())
+	} else {
+		now := time.Now()
+		code = totp(rawsec, now, k.Digits, uint64(k.Period), k.algorithm())
+		secondLeft = 30 - (now.Second() % 30)
 	}
-	if err := f.Close(); err != nil {
-		log.Fatalf("adding key: %v", err)
-	}
+	codeStr = fmt.Sprintf("%0*d", k.Digits, code)
+	return
 }
 
 func (c *Keychain) code(name string) (codeStr string, secondLeft int) {
-	k, ok := c.keys[name]
-	if !ok {
-		log.Fatalf("no such key %q", name)
+	k, idx := c.find(name)
+	if idx < 0 {
+		log.Fatalf("no such label %q", name)
 	}
-	var code int
-	if k.offset != 0 {
-		n, err := strconv.ParseUint(string(c.data[k.offset:k.offset+counterLen]), 10, 64)
-		if err != nil {
-			log.Fatalf("malformed key counter for %q (%q)", name, c.data[k.offset:k.offset+counterLen])
-		}
-		n++
-		code = hotp(k.raw, n, k.digits)
-		f, err := os.OpenFile(c.file, os.O_RDWR, 0600)
-		if err != nil {
-			log.Fatalf("opening keychain: %v", err)
-		}
-		if _, err := f.WriteAt([]byte(fmt.Sprintf("%0*d", counterLen, n)), int64(k.offset)); err != nil {
-			log.Fatalf("updating keychain: %v", err)
-		}
-		if err := f.Close(); err != nil {
-			log.Fatalf("updating keychain: %v", err)
-		}
-	} else {
-		// Time-based key.
-		now := time.Now()
-		code = totp(k.raw, now, k.digits)
-		secondLeft = 30 - (now.Second() % 30)
+	codeStr, secondLeft = k.code()
+	if k.Type == TypeHOTP {
+		c.Keys[idx] = k
+		c.save()
 	}
-	codeStr = fmt.Sprintf("%0*d", k.digits, code)
 	return
 }
 
@@ -308,30 +350,20 @@ func (c *Keychain) show(name string) {
 }
 
 func (c *Keychain) showAll() {
-	var names []string
-	max := 0
-	for name, k := range c.keys {
-		names = append(names, name)
-		if max < k.digits {
-			max = k.digits
-		}
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		k := c.keys[name]
-		code := strings.Repeat("-", k.digits)
+	for _, k := range c.Keys {
+		code := strings.Repeat("-", k.Digits)
 		secondLeft := -1
-		if k.offset == 0 {
-			code, secondLeft = c.code(name)
+		if k.Type != TypeHOTP {
+			code, secondLeft = k.code()
 		}
-		fmt.Printf("%-*s", max, code)
+		fmt.Printf(" %s | %8s", k.Type, code)
 		if secondLeft != -1 {
-			fmt.Printf(" | %02d second(s) left", secondLeft)
+			fmt.Printf(" | %2d second(s) left", secondLeft)
 
 		} else {
 			fmt.Print(" |                  ")
 		}
-		fmt.Printf(" | %s\n", name)
+		fmt.Printf(" | %s\n", k.Label)
 	}
 }
 
@@ -339,8 +371,8 @@ func decodeKey(key string) ([]byte, error) {
 	return base32.StdEncoding.DecodeString(strings.ToUpper(key))
 }
 
-func hotp(key []byte, counter uint64, digits int) int {
-	h := hmac.New(sha1.New, key)
+func hotp(key []byte, counter uint64, digits int, algo func() hash.Hash) int {
+	h := hmac.New(algo, key)
 	binary.Write(h, binary.BigEndian, counter)
 	sum := h.Sum(nil)
 	v := binary.BigEndian.Uint32(sum[sum[len(sum)-1]&0x0F:]) & 0x7FFFFFFF
@@ -351,6 +383,7 @@ func hotp(key []byte, counter uint64, digits int) int {
 	return int(v % d)
 }
 
-func totp(key []byte, t time.Time, digits int) int {
-	return hotp(key, uint64(t.UnixNano())/30e9, digits)
+func totp(key []byte, t time.Time, digits int, period uint64, algo func() hash.Hash) int {
+	period = period * 1e9
+	return hotp(key, uint64(t.UnixNano())/period, digits, algo)
 }
