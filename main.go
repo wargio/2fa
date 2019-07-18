@@ -127,7 +127,6 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "\t2fa -remove keyname\n")
 	fmt.Fprintf(os.Stderr, "\t2fa -list\n")
 	fmt.Fprintf(os.Stderr, "\t2fa [-clip] keyname\n")
-	fmt.Fprintf(os.Stderr, "\t    you can override $HOME/.2fa by exporting 2FA_KEYCHAIN\n")
 	os.Exit(2)
 }
 
@@ -237,6 +236,10 @@ func (c *Keychain) save() {
 }
 
 func (c *Keychain) add(kName string) {
+	_, idx := c.find(kName)
+	if idx >= 0 {
+		log.Fatalf("label %q exists.", kName)
+	}
 	kDigits := 6
 	if *flag7 {
 		kDigits = 7

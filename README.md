@@ -2,11 +2,13 @@
 
 Usage:
 
-    go get -u rsc.io/2fa
+    go get -u github.com/wargio/2fa
 
-    2fa -add [-7] [-8] [-hotp] name
+    2fa -add [-7] [-8] [-hotp] keyname
+    2fa -remove keyname
     2fa -list
-    2fa name
+    2fa [-clip] keyname
+
 
 `2fa -add name` adds a new key to the 2fa keychain with the given name. It
 prints a prompt to standard error and reads a two-factor key from standard
@@ -32,7 +34,8 @@ The default time-based authentication codes are derived from a hash of the
 key and the current time, so it is important that the system clock have at
 least one-minute accuracy.
 
-The keychain is stored unencrypted in the text file `$HOME/.2fa`.
+The keychain is stored unencrypted in the text file `$HOME/.2fa`, but it can be 
+overridden by `$2FA_KEYCHAIN` environment variable.
 
 ## Example
 
