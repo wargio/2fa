@@ -12,11 +12,11 @@ GPG_KEYCHAIN_2FA=${GPG_KEYCHAIN_2FA:-$HOME/.2fa.gpg}
 KEYCHAIN_2FA=${GPG_KEYCHAIN_2FA%.gpg}
 OPT_KEYCHAIN_2FA_TEMP=/tmp/2fa.tmp
 
-if [ $1 == "--help" ] || [ $1 == "-h" ] ; then
+if [ "$1" == "--help" ] || [ "$1" == "-h" ] ; then
     $OPT_2FA --help 2>&1  | grep -v "KEYCHAIN_2FA"
     echo -e "        config at $HOME/.2fa.gpg or via environment variable GPG_KEYCHAIN_2FA."
 else
     $OPT_GPG --decrypt "$GPG_KEYCHAIN_2FA" 2>/dev/null > "$OPT_KEYCHAIN_2FA_TEMP" || die "failed to decrypt $GPG_KEYCHAIN_2FA"
-    KEYCHAIN_2FA="$OPT_KEYCHAIN_2FA_TEMP" $OPT_2FA $@
+    watch -n 5 KEYCHAIN_2FA="$OPT_KEYCHAIN_2FA_TEMP" $OPT_2FA $@
     $OPT_DEL -zvu -n 5 "$OPT_KEYCHAIN_2FA_TEMP" 2> /dev/null > /dev/null
 fi
