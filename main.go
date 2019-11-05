@@ -127,6 +127,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "\t2fa -remove keyname\n")
 	fmt.Fprintf(os.Stderr, "\t2fa -list\n")
 	fmt.Fprintf(os.Stderr, "\t2fa [-clip] keyname\n")
+    fmt.Fprintf(os.Stderr, "\n\tconfig at ~/.2fa or via environment variable KEYCHAIN_2FA\n")
 	os.Exit(2)
 }
 
@@ -137,8 +138,8 @@ func main() {
 	flag.Parse()
 
 	keychainPath := filepath.Join(os.Getenv("HOME"), ".2fa")
-	if len(os.Getenv("2FA_KEYCHAIN")) > 0 {
-		keychainPath = os.Getenv("2FA_KEYCHAIN")
+	if len(os.Getenv("KEYCHAIN_2FA")) > 0 {
+		keychainPath = os.Getenv("KEYCHAIN_2FA")
 	}
 
 	k := readKeychain(keychainPath)
