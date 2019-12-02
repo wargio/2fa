@@ -5,6 +5,12 @@ die() {
     exit 1
 }
 
+destroy() {
+    $OPT_DEL -zvu -n 5 "$OPT_KEYCHAIN_2FA_TEMP" 2> /dev/null > /dev/null
+}
+
+trap destroy 0 1 2 3 13 15
+
 OPT_GPG=$(which gpg)
 OPT_DEL=$(which shred)
 OPT_2FA=$(which 2fa)
@@ -18,5 +24,5 @@ if [ "$1" == "--help" ] || [ "$1" == "-h" ] ; then
 else
     $OPT_GPG --decrypt "$GPG_KEYCHAIN_2FA" 2>/dev/null > "$OPT_KEYCHAIN_2FA_TEMP" || die "failed to decrypt $GPG_KEYCHAIN_2FA"
     watch -n 5 KEYCHAIN_2FA="$OPT_KEYCHAIN_2FA_TEMP" $OPT_2FA $@
-    $OPT_DEL -zvu -n 5 "$OPT_KEYCHAIN_2FA_TEMP" 2> /dev/null > /dev/null
+    destroy
 fi
