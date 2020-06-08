@@ -37,6 +37,10 @@ least one-minute accuracy.
 The keychain is stored unencrypted in the text file `$HOME/.2fa`, but it can be 
 overridden by `$2FA_KEYCHAIN` environment variable.
 
+To use an encrypted `2fa` keychain, please use `2fa-gpg`.
+
+Encrypt the keychain via pgp and save it in `$HOME/.2fa.gpg` or use `GPG_KEYCHAIN_2FA` to override the default location.
+
 ## Example
 
 During GitHub 2FA setup, at the “Scan this barcode with your app” step,
